@@ -1,0 +1,305 @@
+// Atticor Merch Hub — proposed production data model.
+//
+// This is the schema the prototype's in-memory seed data implies, with two
+// structural changes the prototype does NOT yet have (both flagged in HANDOFF.md):
+//   1. Fund — separates firm-paid budgets from foundation-funded ones (L&R vs LRGB).
+//   2. Vendor / BrandVendor — a brand can have more than one vendor. Lerner & Rowe
+//      already sources through On Target Media and BoomPromo, not only SwagMyBrand.
+//
+// Nothing here is migrated yet. Run `npx prisma migrate dev --name init` once
+// DATABASE_URL is set.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+/* ---------------- People & access ---------------- */
+
+enum Role {
+  ADMIN // Hazel — sees every brand, first approval signature
+  BRAND_MANAGER // scoped to their own brand only
+  CREATIVE // Jon — art/proof queue across brands
+  EVENT_MANAGER // event calendar + kit estimates
+  VENDOR // Jenny et al — incoming orders, sourcing, stock
+}
+
+model User {
+  id            String        @id @default(cuid())
+  email         String        @unique
+  name          String
+  role          Role
+  vendorId      String? // set when role = VENDOR
+  vendor        Vendor?       @relation(fields: [vendorId], references: [id])
+  memberships   BrandMember[]
+  requests      Order[]       @relation("requestedBy")
+  approvals     Approval[]
+  createdAt     DateTime      @default(now())
+  lastSignInAt  DateTime?
+}
+
+// Which brands a user can see. ADMIN/CREATIVE need no rows (they see all);
+// BRAND_MANAGER must have exactly the brands they own.
+model BrandMember {
+  id      String @id @default(cuid())
+  userId  String
+  brandId String
+  user    User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  brand   Brand  @relation(fields: [brandId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, brandId])
+}
+
+/* ---------------- Brands, funds, vendors ---------------- */
+
+model Brand {
+  id          String        @id @default(cuid())
+  name        String        @unique // "Lerner & Rowe"
+  shortName   String? // "L&R"
+  active      Boolean       @default(true)
+  members     BrandMember[]
+  funds       Fund[]
+  vendors     BrandVendor[]
+  assets      BrandAsset[]
+  orders      Order[]
+  events      Event[]
+  palette     Json? // [["Mid Green","#013828"], ...] — leave null until verified
+  fonts       String[] // ["STK Bureau Serif — headlines"]
+  createdAt   DateTime      @default(now())
+}
+
+enum FundKind {
+  FIRM // firm operating budget (e.g. L&R)
+  FOUNDATION // 501(c)(3) / giving arm (e.g. LRGB)
+  INDIVIDUAL // personal/partner donations (e.g. LRIA)
+}
+
+// A brand can carry several budgets. Merch spend must draw from exactly one,
+// because firm dollars and foundation dollars are not interchangeable.
+model Fund {
+  id           String   @id @default(cuid())
+  brandId      String
+  brand        Brand    @relation(fields: [brandId], references: [id], onDelete: Cascade)
+  name         String // "L&R Firm", "LRGB Foundation"
+  kind         FundKind
+  fiscalYear   Int
+  poolCents    Int
+  orders       Order[]
+  events       Event[]
+
+  @@unique([brandId, name, fiscalYear])
+}
+
+model Vendor {
+  id       String        @id @default(cuid())
+  name     String        @unique // SwagMyBrand, On Target Media, BoomPromo
+  contact  String?
+  portal   String? // e.g. commonsku presentation base URL
+  users    User[]
+  brands   BrandVendor[]
+  orders   Order[]
+  stock    StockLevel[]
+  decks    BrandAsset[]
+}
+
+model BrandVendor {
+  id        String  @id @default(cuid())
+  brandId   String
+  vendorId  String
+  isPrimary Boolean @default(false)
+  scope     String? // "hats & giveaway swag", "closing gifts"
+  brand     Brand   @relation(fields: [brandId], references: [id], onDelete: Cascade)
+  vendor    Vendor  @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+
+  @@unique([brandId, vendorId])
+}
+
+/* ---------------- Catalog & stock ---------------- */
+
+model CatalogItem {
+  id             String       @id @default(cuid())
+  name           String       @unique
+  category       String // Apparel, Headwear, Bags, Drinkware, Eco-Friendly, Office, Technology, Luxury Items
+  unitPriceCents Int
+  minQty         Int          @default(1)
+  imageUrl       String?
+  active         Boolean      @default(true)
+  orders         Order[]
+  stock          StockLevel[]
+  eventLines     EventEstimateLine[]
+}
+
+enum SourcingStatus {
+  NOT_STARTED
+  SOURCING
+  IN_STOCK
+  BACKORDERED
+}
+
+model StockLevel {
+  id       String         @id @default(cuid())
+  itemId   String
+  vendorId String
+  onHand   Int            @default(0)
+  status   SourcingStatus @default(NOT_STARTED)
+  note     String?
+  item     CatalogItem    @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  vendor   Vendor         @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+
+  @@unique([itemId, vendorId])
+}
+
+/* ---------------- Orders & approvals ---------------- */
+
+enum OrderStatus {
+  REQUESTED
+  IN_DESIGN
+  AWAITING_APPROVAL
+  APPROVED
+  ORDERED
+  IN_PRODUCTION
+  SHIPPED
+  RECEIVED
+  CANCELLED
+}
+
+// REQUESTED..APPROVED count against pipeline (soft commitment);
+// ORDERED..RECEIVED count as committed spend.
+model Order {
+  id             String      @id @default(cuid())
+  reference      String      @unique // "SM-101"
+  brandId        String
+  fundId         String
+  itemId         String
+  vendorId       String?
+  eventId        String?
+  qty            Int
+  unitPriceCents Int // snapshot at request time; catalog price can drift
+  status         OrderStatus @default(REQUESTED)
+  invoiced       Boolean     @default(false)
+  invoiceNumber  String?
+  artworkUrl     String?
+  requestedById  String
+  notes          String?
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+
+  brand       Brand        @relation(fields: [brandId], references: [id])
+  fund        Fund         @relation(fields: [fundId], references: [id])
+  item        CatalogItem  @relation(fields: [itemId], references: [id])
+  vendor      Vendor?      @relation(fields: [vendorId], references: [id])
+  event       Event?       @relation(fields: [eventId], references: [id])
+  requestedBy User         @relation("requestedBy", fields: [requestedById], references: [id])
+  approvals   Approval[]
+  history     StatusEvent[]
+
+  @@index([brandId, status])
+}
+
+enum ApprovalRole {
+  ADMIN
+  BRAND_MANAGER
+}
+
+// Two signatures move an order to APPROVED: admin + the owning brand manager.
+model Approval {
+  id         String       @id @default(cuid())
+  orderId    String
+  as         ApprovalRole
+  userId     String
+  approvedAt DateTime     @default(now())
+  order      Order        @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  user       User         @relation(fields: [userId], references: [id])
+
+  @@unique([orderId, as])
+}
+
+model StatusEvent {
+  id        String      @id @default(cuid())
+  orderId   String
+  from      OrderStatus?
+  to        OrderStatus
+  byUserId  String?
+  at        DateTime    @default(now())
+  order     Order       @relation(fields: [orderId], references: [id], onDelete: Cascade)
+}
+
+/* ---------------- Events ---------------- */
+
+enum EventFunding {
+  FIRM
+  FOUNDATION
+  INDIVIDUAL
+}
+
+model Event {
+  id           String              @id @default(cuid())
+  brandId      String
+  fundId       String?
+  name         String
+  funding      EventFunding        @default(FIRM)
+  dma          String? // AZ, NV, NM, IL, IN — market, per the L&R master plan
+  location     String?
+  startsAt     DateTime
+  headcount    Int?
+  detailsTbd   Boolean             @default(false) // render a "needs detail" flag; never invent specifics
+  sourceNote   String? // e.g. "Community & Events Master Plan, row 42"
+  brand        Brand               @relation(fields: [brandId], references: [id], onDelete: Cascade)
+  fund         Fund?               @relation(fields: [fundId], references: [id])
+  estimate     EventEstimateLine[]
+  orders       Order[]
+
+  @@index([brandId, startsAt])
+}
+
+// The suggested merch kit for an event; one click turns these into Orders.
+model EventEstimateLine {
+  id      String      @id @default(cuid())
+  eventId String
+  itemId  String
+  qty     Int
+  event   Event       @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  item    CatalogItem @relation(fields: [itemId], references: [id])
+
+  @@unique([eventId, itemId])
+}
+
+/* ---------------- Brand Hub assets ---------------- */
+
+enum AssetKind {
+  GUIDELINES // PDF or Canva brand kit
+  MERCH_PHOTO // past run / current stock photo
+  IDEA_DECK // vendor presentation (commonsku)
+  LOGO
+  TEMPLATE
+}
+
+enum MerchState {
+  IN_STOCK
+  ARCHIVED
+  IN_PRODUCTION
+}
+
+model BrandAsset {
+  id         String      @id @default(cuid())
+  brandId    String
+  kind       AssetKind
+  label      String
+  url        String? // external link (Canva, commonsku) or Vercel Blob URL
+  fileKey    String? // Blob key when uploaded
+  mimeType   String?
+  merchState MerchState? // only for MERCH_PHOTO
+  note       String?
+  vendorId   String? // who produced/presented it
+  uploadedBy String?
+  createdAt  DateTime    @default(now())
+  brand      Brand       @relation(fields: [brandId], references: [id], onDelete: Cascade)
+  vendor     Vendor?     @relation(fields: [vendorId], references: [id])
+
+  @@index([brandId, kind])
+}

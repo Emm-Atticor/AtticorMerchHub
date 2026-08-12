@@ -1,0 +1,30 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+  STK Bureau Serif and STK Miso are licensed foundry faces, not free web fonts.
+  Drop the licensed .woff2 files into /public/fonts and uncomment below; until
+  then the app falls back to a system serif/sans, which is intentional.
+
+  @font-face {
+    font-family: "STK Bureau Serif";
+    src: url("/fonts/STKBureauSerif.woff2") format("woff2");
+    font-weight: 400;
+    font-display: swap;
+  }
+  @font-face {
+    font-family: "STK Miso";
+    src: url("/fonts/STKMiso.woff2") format("woff2");
+    font-weight: 400;
+    font-display: swap;
+  }
+*/
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: #f8faf2;
+  -webkit-font-smoothing: antialiased;
+}
